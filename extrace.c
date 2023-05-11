@@ -183,6 +183,69 @@ pid_depth(pid_t pid)
 	return d + 1;
 }
 
+struct s_pid_info {
+	int depth;
+	pid_t ppid;
+};
+
+static struct s_pid_info
+pid_info(pid_t pid)
+{
+	struct s_pid_info ans = {0};
+	pid_t ppid = 0;
+	char name[PATH_MAX];
+	char buf[2048];
+	char *s;
+	int fd, d, i;
+
+	if (pid == 1 && parent == 1)
+		return ans;
+
+	snprintf(name, sizeof name, "/proc/%d/stat", pid);
+
+	if ((fd = open(name, O_RDONLY)) < 0)
+		return ans;
+	if (read(fd, buf, sizeof buf) <= 0)
+		return ans;
+	close(fd);
+
+	s = strrchr(buf, ')');  /* find end of COMM (recommended way) */
+	if (!s)
+		return ans;
+	while (*++s == ' ')
+		;
+	/* skip over STATE */
+	while (*++s == ' ')
+		;
+	errno = 0;
+	ppid = strtol(s, 0, 10);  /* parse PPID */
+	if (errno != 0)
+		return ans;
+
+	if (ppid == parent)
+		return ans;
+
+	if (ppid == 0) {  /* a parent we are not interested in */
+		ans.depth = -1;
+		return ans;
+	}
+
+	for (i = 0; i < PID_DB_SIZE - 1; i++)
+		if (pid_db[i].pid == ppid)
+			d = pid_db[i].depth;
+	if (i == PID_DB_SIZE - 1)
+		d = pid_depth(ppid);  /* we need to recurse */
+
+	if (d == -1) {
+		ans.depth = -1;
+		return ans;
+	}
+
+	ans.depth = d + 1;
+	ans.ppid = ppid;
+	return ans;
+}
+
 static const char *
 sig2name(int sig)
 {
@@ -320,9 +383,11 @@ handle_msg(struct cn_msg *cn_hdr)
 
 	int r = 0, r2 = 0, r3 = 0, fd, d;
 	struct proc_event *ev = (struct proc_event *)cn_hdr->data;
+	struct s_pid_info pinfo;
 
 	if (ev->what == PROC_EVENT_EXEC) {
 		pid_t pid = ev->event_data.exec.process_pid;
+		pid_t ppid;
 		int i = 0;
 		int proc_dir_fd = open_proc_dir(pid);
 		if (proc_dir_fd < 0) {
@@ -350,7 +415,10 @@ handle_msg(struct cn_msg *cn_hdr)
 			argvrest = strchr(cmdline, 0) + 1;
 		}
 
-		d = pid_depth(pid);
+		pinfo = pid_info(pid);
+		d = pinfo.depth;
+		ppid = pinfo.ppid;
+
 		if (d < 0) {
 			if (parent == 1) {
 				if (*cmdline) {
@@ -401,7 +469,7 @@ handle_msg(struct cn_msg *cn_hdr)
 
 		if (!flat)
 			fprintf(output, "%*s", 2*d, "");
-		fprintf(output, "%d", pid);
+		fprintf(output, "%d>%d", ppid, pid);
 		if (show_exit) {
 			putc('+', output);
 			snprintf(pid_db[i].cmdline, CMDLINE_DB_MAX,
